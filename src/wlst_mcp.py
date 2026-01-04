@@ -33,6 +33,7 @@ mcp = FastMCP("wlst_mcp")
 WLST_PATH = os.environ.get("WLST_PATH", "wlst.cmd" if os.name == "nt" else "wlst.sh")
 WEBLOGIC_HOME = os.environ.get("WEBLOGIC_HOME", "")
 DEFAULT_TIMEOUT = int(os.environ.get("WLST_TIMEOUT", "120"))
+DEFAULT_SHUTDOWN_TIMEOUT = int(os.environ.get("WLST_SHUTDOWN_TIMEOUT", "300"))
 
 # Default connection credentials from environment variables
 DEFAULT_ADMIN_URL = os.environ.get("WLST_ADMIN_URL", "")
@@ -120,8 +121,8 @@ class ServerOperationInput(BaseModel):
     username: Optional[str] = Field(default=None, description="WebLogic admin username. Uses WLST_USERNAME env var if not provided.")
     password: Optional[str] = Field(default=None, description="WebLogic admin password. Uses WLST_PASSWORD env var if not provided.")
     server_name: str = Field(..., description="Name of the managed server to operate on", min_length=1, max_length=100)
-    force: Optional[bool] = Field(default=False, description="Force the operation (for stop/restart)")
-    timeout: Optional[int] = Field(default=DEFAULT_TIMEOUT, description="Operation timeout in seconds", ge=10, le=600)
+    force: Optional[bool] = Field(default=False, description="Force shutdown (immediate). If false, graceful shutdown waits for sessions to complete.")
+    timeout: Optional[int] = Field(default=DEFAULT_SHUTDOWN_TIMEOUT, description="Operation timeout in seconds. Graceful shutdown may need longer timeout.", ge=10, le=600)
 
     def get_admin_url(self) -> str:
         return self.admin_url or DEFAULT_ADMIN_URL
@@ -640,18 +641,39 @@ async def wlst_stop_server(params: ServerOperationInput) -> str:
 {_build_connect_script(params.get_admin_url(), params.get_username(), params.get_password())}
 
 try:
-    shutdown('{params.server_name}', 'Server'{force_param})
-    print('SERVER_STOPPED: {params.server_name}')
+    domainRuntime()
+    cd('ServerLifeCycleRuntimes/{params.server_name}')
+    serverState = cmo.getState()
+    print('SERVER_STATE: ' + serverState)
+
+    if serverState == 'SHUTDOWN':
+        print('SERVER_ALREADY_STOPPED: {params.server_name}')
+    elif serverState in ['RUNNING', 'ADMIN', 'RESUMING']:
+        shutdown('{params.server_name}', 'Server', ignoreSessions='true', timeOut=90{force_param})
+        print('SERVER_STOPPED: {params.server_name}')
+    elif serverState in ['STARTING', 'STANDBY', 'SUSPENDING']:
+        shutdown('{params.server_name}', 'Server', ignoreSessions='true', timeOut=90, force='true')
+        print('SERVER_STOPPED: {params.server_name}')
+    else:
+        print('SERVER_UNKNOWN_STATE: ' + serverState)
 except Exception as e:
     print('STOP_ERROR: ' + str(e))
 
 {_build_disconnect_script()}
 '''
 
-    result = await _execute_wlst_script(script, params.timeout or DEFAULT_TIMEOUT)
+    result = await _execute_wlst_script(script, params.timeout or DEFAULT_SHUTDOWN_TIMEOUT)
 
     if result['success'] and 'SERVER_STOPPED' in result['stdout']:
         return f"Server **{params.server_name}** stopped successfully."
+
+    if 'SERVER_ALREADY_STOPPED' in result['stdout']:
+        return f"Server **{params.server_name}** is already stopped."
+
+    if 'SERVER_UNKNOWN_STATE' in result['stdout']:
+        state_line = [l for l in result['stdout'].split('\n') if 'SERVER_STATE' in l]
+        state = state_line[0].replace('SERVER_STATE: ', '') if state_line else 'unknown'
+        return f"Server **{params.server_name}** is in state **{state}** and cannot be stopped normally."
 
     if 'STOP_ERROR' in result['stdout']:
         error_line = [l for l in result['stdout'].split('\n') if 'STOP_ERROR' in l]
@@ -683,7 +705,7 @@ async def wlst_restart_server(params: ServerOperationInput) -> str:
 {_build_connect_script(params.get_admin_url(), params.get_username(), params.get_password())}
 
 try:
-    shutdown('{params.server_name}', 'Server'{force_param})
+    shutdown('{params.server_name}', 'Server', ignoreSessions='true', timeOut=120{force_param})
     print('SERVER_STOPPED: {params.server_name}')
     start('{params.server_name}', 'Server')
     print('SERVER_RESTARTED: {params.server_name}')
@@ -693,7 +715,7 @@ except Exception as e:
 {_build_disconnect_script()}
 '''
 
-    result = await _execute_wlst_script(script, params.timeout or DEFAULT_TIMEOUT)
+    result = await _execute_wlst_script(script, params.timeout or DEFAULT_SHUTDOWN_TIMEOUT)
 
     if result['success'] and 'SERVER_RESTARTED' in result['stdout']:
         return f"Server **{params.server_name}** restarted successfully."
