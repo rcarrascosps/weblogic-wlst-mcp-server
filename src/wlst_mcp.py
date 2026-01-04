@@ -967,36 +967,40 @@ metrics = {{'server': '{params.server_name}'}}
 
 try:
     domainRuntime()
-    cd('ServerRuntimes/{params.server_name}')
+    serverPath = 'ServerRuntimes/{params.server_name}'
 
     # JVM metrics
     if '{params.metric_type}' in ['all', 'jvm']:
-        cd('JVMRuntime/{params.server_name}')
-        metrics['jvm'] = {{
-            'heapSizeCurrent': cmo.getHeapSizeCurrent(),
-            'heapSizeMax': cmo.getHeapSizeMax(),
-            'heapFreeCurrent': cmo.getHeapFreeCurrent(),
-            'heapFreePercent': cmo.getHeapFreePercent(),
-            'uptime': cmo.getUptime()
-        }}
-        cd('..')
+        try:
+            cd(serverPath + '/JVMRuntime/{params.server_name}')
+            metrics['jvm'] = {{
+                'heapSizeCurrent': cmo.getHeapSizeCurrent(),
+                'heapSizeMax': cmo.getHeapSizeMax(),
+                'heapFreeCurrent': cmo.getHeapFreeCurrent(),
+                'heapFreePercent': cmo.getHeapFreePercent(),
+                'uptime': cmo.getUptime()
+            }}
+        except Exception as jvmEx:
+            metrics['jvm'] = {{'error': str(jvmEx)}}
 
     # Thread metrics
     if '{params.metric_type}' in ['all', 'threads']:
-        cd('ThreadPoolRuntime/ThreadPoolRuntime')
-        metrics['threads'] = {{
-            'executeThreadTotalCount': cmo.getExecuteThreadTotalCount(),
-            'executeThreadIdleCount': cmo.getExecuteThreadIdleCount(),
-            'hoggingThreadCount': cmo.getHoggingThreadCount(),
-            'pendingUserRequestCount': cmo.getPendingUserRequestCount(),
-            'queueLength': cmo.getQueueLength()
-        }}
-        cd('..')
+        try:
+            cd(serverPath + '/ThreadPoolRuntime/ThreadPoolRuntime')
+            metrics['threads'] = {{
+                'executeThreadTotalCount': cmo.getExecuteThreadTotalCount(),
+                'executeThreadIdleCount': cmo.getExecuteThreadIdleCount(),
+                'hoggingThreadCount': cmo.getHoggingThreadCount(),
+                'pendingUserRequestCount': cmo.getPendingUserRequestCount(),
+                'queueLength': cmo.getQueueLength()
+            }}
+        except Exception as threadEx:
+            metrics['threads'] = {{'error': str(threadEx)}}
 
     # JDBC metrics
     if '{params.metric_type}' in ['all', 'jdbc']:
         try:
-            cd('JDBCServiceRuntime/{params.server_name}')
+            cd(serverPath + '/JDBCServiceRuntime/{params.server_name}')
             dsRuntimes = ls('JDBCDataSourceRuntimeMBeans', returnMap='true')
             jdbc_data = []
             if dsRuntimes:
@@ -1012,9 +1016,8 @@ try:
                     }})
                     cd('..')
             metrics['jdbc'] = jdbc_data
-            cd('..')
         except Exception as jdbcEx:
-            metrics['jdbc'] = []
+            metrics['jdbc'] = {{'error': str(jdbcEx)}}
 
     print('METRICS_JSON:' + json.dumps(metrics))
 except Exception as e:
@@ -1049,40 +1052,62 @@ except Exception as e:
 
     if 'jvm' in metrics:
         jvm = metrics['jvm']
-        heap_used = jvm['heapSizeCurrent'] - jvm['heapFreeCurrent']
-        heap_used_mb = heap_used / (1024 * 1024)
-        heap_max_mb = jvm['heapSizeMax'] / (1024 * 1024)
-        lines.extend([
-            "## JVM Metrics",
-            f"- **Heap Used**: {heap_used_mb:.1f} MB / {heap_max_mb:.1f} MB ({100 - jvm['heapFreePercent']:.1f}%)",
-            f"- **Heap Free**: {jvm['heapFreePercent']:.1f}%",
-            f"- **Uptime**: {jvm['uptime'] / 1000:.0f} seconds",
-            ""
-        ])
+        if 'error' in jvm:
+            lines.extend([
+                "## JVM Metrics",
+                f"- **Error**: {jvm['error']}",
+                ""
+            ])
+        else:
+            heap_used = jvm['heapSizeCurrent'] - jvm['heapFreeCurrent']
+            heap_used_mb = heap_used / (1024 * 1024)
+            heap_max_mb = jvm['heapSizeMax'] / (1024 * 1024)
+            lines.extend([
+                "## JVM Metrics",
+                f"- **Heap Used**: {heap_used_mb:.1f} MB / {heap_max_mb:.1f} MB ({100 - jvm['heapFreePercent']:.1f}%)",
+                f"- **Heap Free**: {jvm['heapFreePercent']:.1f}%",
+                f"- **Uptime**: {jvm['uptime'] / 1000:.0f} seconds",
+                ""
+            ])
 
     if 'threads' in metrics:
         t = metrics['threads']
-        lines.extend([
-            "## Thread Pool Metrics",
-            f"- **Total Threads**: {t['executeThreadTotalCount']}",
-            f"- **Idle Threads**: {t['executeThreadIdleCount']}",
-            f"- **Hogging Threads**: {t['hoggingThreadCount']}",
-            f"- **Pending Requests**: {t['pendingUserRequestCount']}",
-            f"- **Queue Length**: {t['queueLength']}",
-            ""
-        ])
-
-    if 'jdbc' in metrics and metrics['jdbc']:
-        lines.append("## JDBC Datasource Metrics")
-        for ds in metrics['jdbc']:
+        if 'error' in t:
             lines.extend([
-                f"### {ds['name']}",
-                f"- **State**: {ds['state']}",
-                f"- **Active Connections**: {ds['activeConnectionsCurrentCount']} (High: {ds['activeConnectionsHighCount']})",
-                f"- **Total Connections**: {ds['connectionsTotalCount']}",
-                f"- **Waiting for Connection**: {ds['waitingForConnectionCurrentCount']}",
+                "## Thread Pool Metrics",
+                f"- **Error**: {t['error']}",
                 ""
             ])
+        else:
+            lines.extend([
+                "## Thread Pool Metrics",
+                f"- **Total Threads**: {t['executeThreadTotalCount']}",
+                f"- **Idle Threads**: {t['executeThreadIdleCount']}",
+                f"- **Hogging Threads**: {t['hoggingThreadCount']}",
+                f"- **Pending Requests**: {t['pendingUserRequestCount']}",
+                f"- **Queue Length**: {t['queueLength']}",
+                ""
+            ])
+
+    if 'jdbc' in metrics and metrics['jdbc']:
+        jdbc = metrics['jdbc']
+        if isinstance(jdbc, dict) and 'error' in jdbc:
+            lines.extend([
+                "## JDBC Datasource Metrics",
+                f"- **Error**: {jdbc['error']}",
+                ""
+            ])
+        elif isinstance(jdbc, list):
+            lines.append("## JDBC Datasource Metrics")
+            for ds in jdbc:
+                lines.extend([
+                    f"### {ds['name']}",
+                    f"- **State**: {ds['state']}",
+                    f"- **Active Connections**: {ds['activeConnectionsCurrentCount']} (High: {ds['activeConnectionsHighCount']})",
+                    f"- **Total Connections**: {ds['connectionsTotalCount']}",
+                    f"- **Waiting for Connection**: {ds['waitingForConnectionCurrentCount']}",
+                    ""
+                ])
 
     return '\n'.join(lines)
 
