@@ -13,6 +13,7 @@ wlst-mcp/
 ├── src/
 │   └── wlst_mcp.py          # Main MCP server implementation
 ├── README.md                 # This file - main documentation
+├── ARCHITECTURE.md           # System architecture diagrams
 ├── INSTALLATION.md           # Prerequisites and installation guide
 ├── INTEGRATION.md            # Claude Desktop & Claude Code setup
 ├── EXAMPLES.md               # Usage examples and custom scripts
@@ -46,6 +47,7 @@ wlst-mcp/
 
 | Document | Description |
 |----------|-------------|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | System architecture and component diagrams |
 | [INSTALLATION.md](INSTALLATION.md) | Prerequisites, installation, security configuration |
 | [INTEGRATION.md](INTEGRATION.md) | Claude Desktop & Claude Code integration |
 | [EXAMPLES.md](EXAMPLES.md) | Usage examples and custom WLST scripts |
@@ -152,33 +154,42 @@ Start a managed server in a WebLogic domain.
 
 ### wlst_stop_server
 
-Stop a managed server in a WebLogic domain.
+Stop a managed server in a WebLogic domain. Supports two shutdown modes:
+
+- **Graceful shutdown** (default): Waits for active sessions to complete before stopping. This is safer for production environments but takes longer.
+- **Force shutdown**: Stops the server immediately without waiting for sessions. Use when you need to stop quickly or the server is unresponsive.
 
 **Parameters:**
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `server_name` | string | **Yes** | Name of the managed server to stop |
-| `force` | boolean | No | Force stop the server (default: false) |
+| `force` | boolean | No | Force shutdown (immediate). If `false`, performs graceful shutdown waiting for sessions to complete. Default: `false` |
 | `admin_url` | string | No | Admin Server URL |
 | `username` | string | No | WebLogic admin username |
 | `password` | string | No | WebLogic admin password |
-| `timeout` | integer | No | Operation timeout in seconds (10-600, default: 120) |
+| `timeout` | integer | No | Operation timeout in seconds. Graceful shutdown may need longer timeout. (10-600, default: 300) |
+
+**Shutdown Modes Comparison:**
+| Mode | Parameter | Behavior | Use Case |
+|------|-----------|----------|----------|
+| Graceful | `force: false` | Waits for sessions to complete | Production, scheduled maintenance |
+| Force | `force: true` | Immediate stop, sessions terminated | Emergency, unresponsive server |
 
 ---
 
 ### wlst_restart_server
 
-Restart a managed server in a WebLogic domain.
+Restart a managed server in a WebLogic domain. Performs a stop followed by a start.
 
 **Parameters:**
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `server_name` | string | **Yes** | Name of the managed server to restart |
-| `force` | boolean | No | Force restart the server (default: false) |
+| `force` | boolean | No | Force shutdown during restart. If `false`, performs graceful shutdown waiting for sessions. Default: `false` |
 | `admin_url` | string | No | Admin Server URL |
 | `username` | string | No | WebLogic admin username |
 | `password` | string | No | WebLogic admin password |
-| `timeout` | integer | No | Operation timeout in seconds (10-600, default: 120) |
+| `timeout` | integer | No | Operation timeout in seconds. Graceful restart may need longer timeout. (10-600, default: 300) |
 
 ---
 

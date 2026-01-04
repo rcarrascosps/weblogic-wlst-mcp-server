@@ -16,12 +16,10 @@ This document provides practical examples for using the WLST MCP Server tools.
 
 ### List All Servers
 
-```json
-{
-  "tool": "wlst_list_servers",
-  "params": {}
-}
-```
+**User prompt:**
+> "Show me all WebLogic servers and their status"
+
+> "List the servers in my domain"
 
 **Example Output:**
 ```markdown
@@ -33,54 +31,84 @@ This document provides practical examples for using the WLST MCP Server tools.
 - 🟢 **test_server1**: RUNNING
 ```
 
+---
+
 ### Start a Managed Server
 
-```json
-{
-  "tool": "wlst_start_server",
-  "params": {
-    "server_name": "test_server1"
-  }
-}
-```
+**User prompt:**
+> "Start the server test_server1"
+
+> "Bring up test_server1"
 
 **Example Output:**
 ```
 Server **test_server1** started successfully.
 ```
 
+---
+
 ### Stop a Managed Server
 
-```json
-{
-  "tool": "wlst_stop_server",
-  "params": {
-    "server_name": "test_server1"
-  }
-}
+The stop operation supports two modes:
+
+#### Graceful Shutdown (Default)
+
+Waits for active sessions to complete before stopping. Recommended for production environments.
+
+**User prompt:**
+> "Stop the server test_server1"
+
+> "Shut down test_server1 gracefully"
+
+> "Stop test_server1 and wait for sessions to finish"
+
+**Example Output:**
+```
+Server **test_server1** stopped successfully.
 ```
 
-### Force Stop a Server
+#### Force Shutdown
 
-```json
-{
-  "tool": "wlst_stop_server",
-  "params": {
-    "server_name": "test_server1",
-    "force": true
-  }
-}
+Stops the server immediately without waiting for sessions. Use when the server is unresponsive or you need to stop quickly.
+
+**User prompt:**
+> "Force stop the server test_server1"
+
+> "Stop test_server1 immediately"
+
+> "Kill the server test_server1 right now"
+
+> "Shut down test_server1 without waiting"
+
+**Example Output:**
 ```
+Server **test_server1** stopped successfully.
+```
+
+#### Shutdown Comparison
+
+| Mode | When to Use | User Prompt Examples |
+|------|-------------|---------------------|
+| **Graceful** | Normal operations, scheduled maintenance | "Stop test_server1", "Shut down gracefully" |
+| **Force** | Emergency, unresponsive server, quick restart needed | "Force stop", "Stop immediately", "Kill the server" |
+
+---
 
 ### Restart a Server
 
-```json
-{
-  "tool": "wlst_restart_server",
-  "params": {
-    "server_name": "test_server1"
-  }
-}
+**User prompt:**
+> "Restart the server test_server1"
+
+> "Reboot test_server1"
+
+For a quick restart with force shutdown:
+> "Force restart test_server1"
+
+> "Restart test_server1 immediately"
+
+**Example Output:**
+```
+Server **test_server1** restarted successfully.
 ```
 
 ---
@@ -380,14 +408,21 @@ When built-in tools don't provide enough detail, use `wlst_execute_script` with 
 
 ### 4. Timeouts for Long Operations
 
-For operations that may take longer (deployments, server starts), increase the timeout:
+Server shutdown and restart operations have a default timeout of **300 seconds** to accommodate graceful shutdowns that wait for sessions to complete.
 
-```json
-{
-  "tool": "wlst_start_server",
-  "params": {
-    "server_name": "managed_server1",
-    "timeout": 300
-  }
-}
-```
+For other operations that may take longer (deployments, server starts), you can increase the timeout:
+
+**User prompt:**
+> "Start the server managed_server1 with a timeout of 5 minutes"
+
+### 5. Graceful vs Force Shutdown
+
+Choose the right shutdown mode for your situation:
+
+| Situation | Recommended Mode | User Prompt |
+|-----------|-----------------|-------------|
+| Scheduled maintenance | Graceful (default) | "Stop the server" |
+| Server is unresponsive | Force | "Force stop the server" |
+| Quick restart needed | Force | "Restart the server immediately" |
+| Production with active users | Graceful (default) | "Stop the server gracefully" |
+| Emergency situation | Force | "Kill the server now" |
