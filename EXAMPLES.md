@@ -241,12 +241,127 @@ Server **test_server1** restarted successfully.
 
 ### List All Applications
 
+**User prompt:**
+> "List all deployed applications"
+
+> "Show me what apps are running"
+
 ```json
 {
   "tool": "wlst_list_applications",
   "params": {}
 }
 ```
+
+**Example Output:**
+```markdown
+# WebLogic Applications
+
+**Total applications**: 2
+
+## 🟢 **SampleWebApp**
+- **Type**: war
+- **State**: STATE_ACTIVE
+- **Targets**: test_server1
+
+## 🔴 **myapp**
+- **Type**: war
+- **State**: STATE_PREPARED
+- **Targets**: test_server1
+```
+
+---
+
+### Start an Application
+
+Start a deployed application that is in a stopped (prepared) state.
+
+**User prompt:**
+> "Start the application myapp"
+
+> "Bring up myapp"
+
+> "Activate the application myapp"
+
+```json
+{
+  "tool": "wlst_start_application",
+  "params": {
+    "app_name": "myapp"
+  }
+}
+```
+
+**Example Output:**
+```
+Application **myapp** started successfully.
+```
+
+---
+
+### Stop an Application
+
+Stop a running application without undeploying it. The application remains deployed but inactive.
+
+**User prompt:**
+> "Stop the application myapp"
+
+> "Deactivate myapp"
+
+> "Take myapp offline"
+
+```json
+{
+  "tool": "wlst_stop_application",
+  "params": {
+    "app_name": "myapp"
+  }
+}
+```
+
+**Example Output:**
+```
+Application **myapp** stopped successfully.
+```
+
+---
+
+### Redeploy an Application
+
+Update an application in place without undeploying it first. Useful for applying changes to an already deployed application.
+
+**User prompt:**
+> "Redeploy the application myapp"
+
+> "Update myapp in place"
+
+> "Refresh myapp deployment"
+
+```json
+{
+  "tool": "wlst_redeploy_application",
+  "params": {
+    "app_name": "myapp"
+  }
+}
+```
+
+**Example Output:**
+```
+Application **myapp** redeployed successfully.
+```
+
+---
+
+### Application Lifecycle Comparison
+
+| Operation | Use Case | Result |
+|-----------|----------|--------|
+| **Deploy** | Initial deployment of a new application | App deployed and started |
+| **Start** | Activate a stopped application | App state changes to ACTIVE |
+| **Stop** | Temporarily deactivate an application | App state changes to PREPARED |
+| **Redeploy** | Update application with new version | App refreshed in place |
+| **Undeploy** | Remove application completely | App removed from domain |
 
 ---
 
