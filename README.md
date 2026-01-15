@@ -84,6 +84,9 @@ wlst-mcp/
 |------|-------------|
 | `wlst_deploy` | Deploy an application (WAR, EAR, JAR) |
 | `wlst_undeploy` | Undeploy an application |
+| `wlst_start_application` | Start a deployed application |
+| `wlst_stop_application` | Stop a running application (without undeploying) |
+| `wlst_redeploy_application` | Redeploy an application in place |
 | `wlst_list_applications` | List all deployed applications |
 
 ### Monitoring & Metrics
@@ -224,6 +227,57 @@ Undeploy an application from WebLogic Server.
 | `username` | string | No | WebLogic admin username |
 | `password` | string | No | WebLogic admin password |
 | `timeout` | integer | No | Operation timeout (10-600, default: 120) |
+
+---
+
+### wlst_start_application
+
+Start a deployed application in WebLogic Server. The application must be already deployed but in a stopped (STATE_PREPARED) state.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `app_name` | string | **Yes** | Name of the application to start |
+| `admin_url` | string | No | Admin Server URL |
+| `username` | string | No | WebLogic admin username |
+| `password` | string | No | WebLogic admin password |
+| `timeout` | integer | No | Operation timeout in seconds (10-600, default: 120) |
+
+---
+
+### wlst_stop_application
+
+Stop a running application in WebLogic Server without undeploying it. The application transitions from STATE_ACTIVE to STATE_PREPARED, allowing it to be started again later.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `app_name` | string | **Yes** | Name of the application to stop |
+| `admin_url` | string | No | Admin Server URL |
+| `username` | string | No | WebLogic admin username |
+| `password` | string | No | WebLogic admin password |
+| `timeout` | integer | No | Operation timeout in seconds (10-600, default: 120) |
+
+**Application States:**
+| State | Description |
+|-------|-------------|
+| `STATE_ACTIVE` | Application is running and serving requests |
+| `STATE_PREPARED` | Application is deployed but stopped (not serving requests) |
+
+---
+
+### wlst_redeploy_application
+
+Redeploy an application in WebLogic Server. This updates the application in place without changing its configuration or targets. Useful for updating application code without a full undeploy/deploy cycle.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `app_name` | string | **Yes** | Name of the application to redeploy |
+| `admin_url` | string | No | Admin Server URL |
+| `username` | string | No | WebLogic admin username |
+| `password` | string | No | WebLogic admin password |
+| `timeout` | integer | No | Operation timeout in seconds (10-600, default: 120) |
 
 ---
 

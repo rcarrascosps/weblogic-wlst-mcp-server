@@ -183,6 +183,25 @@ class UndeployInput(BaseModel):
     def get_password(self) -> str:
         return self.password or DEFAULT_PASSWORD
 
+class AppOperationInput(BaseModel):
+    '''Input model for application operations (start/stop/redeploy).'''
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra='forbid')
+
+    admin_url: Optional[str] = Field(default=None, description="Admin Server URL. Uses WLST_ADMIN_URL env var if not provided.")
+    username: Optional[str] = Field(default=None, description="WebLogic admin username. Uses WLST_USERNAME env var if not provided.")
+    password: Optional[str] = Field(default=None, description="WebLogic admin password. Uses WLST_PASSWORD env var if not provided.")
+    app_name: str = Field(..., description="Name of the application", min_length=1, max_length=200)
+    timeout: Optional[int] = Field(default=DEFAULT_TIMEOUT, description="Operation timeout in seconds", ge=10, le=600)
+
+    def get_admin_url(self) -> str:
+        return self.admin_url or DEFAULT_ADMIN_URL
+
+    def get_username(self) -> str:
+        return self.username or DEFAULT_USERNAME
+
+    def get_password(self) -> str:
+        return self.password or DEFAULT_PASSWORD
+
 class ListAppsInput(BaseModel):
     '''Input model for listing applications.'''
     model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra='forbid')
@@ -535,13 +554,25 @@ import json
 servers = []
 domainRuntime()
 cd('ServerLifeCycleRuntimes')
-serverNames = ls(returnMap='true')
+serverNamesRaw = ls(returnMap='true')
 
-for serverName in serverNames:
-    cd(serverName)
-    state = cmo.getState()
-    servers.append({{'name': serverName, 'state': state}})
-    cd('..')
+# Handle both dict and list types returned by ls()
+if serverNamesRaw:
+    if hasattr(serverNamesRaw, 'keys'):
+        serverNames = list(serverNamesRaw.keys())
+    else:
+        serverNames = list(serverNamesRaw)
+else:
+    serverNames = []
+
+for i in range(len(serverNames)):
+    name = str(serverNames[i])
+    try:
+        cd('/ServerLifeCycleRuntimes/' + name)
+        state = str(cmo.getState())
+        servers.append({{'name': name, 'state': state}})
+    except Exception as e:
+        servers.append({{'name': name, 'state': 'ERROR: ' + str(e)}})
 
 print('SERVERS_JSON:' + json.dumps(servers))
 {_build_disconnect_script()}
@@ -746,13 +777,15 @@ async def wlst_deploy(params: DeployInput) -> str:
         str: Deployment result message
     '''
     targets_param = f", targets='{params.targets}'" if params.targets else ""
-    plan_param = f", planPath='{params.plan_path}'" if params.plan_path else ""
+    plan_param = f", planPath='{params.plan_path.replace(chr(92), '/')}'" if params.plan_path else ""
+    # Convert backslashes to forward slashes for Windows path compatibility
+    app_path_safe = params.app_path.replace('\\', '/')
 
     script = f'''
 {_build_connect_script(params.get_admin_url(), params.get_username(), params.get_password())}
 
 try:
-    deploy('{params.app_name}', '{params.app_path}'{targets_param}, stageMode='{params.stage_mode}'{plan_param})
+    deploy('{params.app_name}', '{app_path_safe}'{targets_param}, stageMode='{params.stage_mode}'{plan_param})
     print('DEPLOY_SUCCESS: {params.app_name}')
 except Exception as e:
     print('DEPLOY_ERROR: ' + str(e))
@@ -816,6 +849,132 @@ except Exception as e:
     return _handle_error(result)
 
 @mcp.tool(
+    name="wlst_start_application",
+    annotations={
+        "title": "Start Application",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def wlst_start_application(params: AppOperationInput) -> str:
+    '''Start a deployed application in WebLogic Server.
+
+    Args:
+        params (AppOperationInput): Application operation parameters
+
+    Returns:
+        str: Operation result message
+    '''
+    script = f'''
+{_build_connect_script(params.get_admin_url(), params.get_username(), params.get_password())}
+
+try:
+    startApplication('{params.app_name}')
+    print('START_SUCCESS: {params.app_name}')
+except Exception as e:
+    print('START_ERROR: ' + str(e))
+
+{_build_disconnect_script()}
+'''
+
+    result = await _execute_wlst_script(script, params.timeout or DEFAULT_TIMEOUT)
+
+    if result['success'] and 'START_SUCCESS' in result['stdout']:
+        return f"Application **{params.app_name}** started successfully."
+
+    if 'START_ERROR' in result['stdout']:
+        error_line = [l for l in result['stdout'].split('\n') if 'START_ERROR' in l]
+        return f"Error starting application: {error_line[0].replace('START_ERROR: ', '') if error_line else 'Unknown error'}"
+
+    return _handle_error(result)
+
+@mcp.tool(
+    name="wlst_stop_application",
+    annotations={
+        "title": "Stop Application",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def wlst_stop_application(params: AppOperationInput) -> str:
+    '''Stop a running application in WebLogic Server (without undeploying).
+
+    Args:
+        params (AppOperationInput): Application operation parameters
+
+    Returns:
+        str: Operation result message
+    '''
+    script = f'''
+{_build_connect_script(params.get_admin_url(), params.get_username(), params.get_password())}
+
+try:
+    stopApplication('{params.app_name}')
+    print('STOP_SUCCESS: {params.app_name}')
+except Exception as e:
+    print('STOP_ERROR: ' + str(e))
+
+{_build_disconnect_script()}
+'''
+
+    result = await _execute_wlst_script(script, params.timeout or DEFAULT_TIMEOUT)
+
+    if result['success'] and 'STOP_SUCCESS' in result['stdout']:
+        return f"Application **{params.app_name}** stopped successfully."
+
+    if 'STOP_ERROR' in result['stdout']:
+        error_line = [l for l in result['stdout'].split('\n') if 'STOP_ERROR' in l]
+        return f"Error stopping application: {error_line[0].replace('STOP_ERROR: ', '') if error_line else 'Unknown error'}"
+
+    return _handle_error(result)
+
+@mcp.tool(
+    name="wlst_redeploy_application",
+    annotations={
+        "title": "Redeploy Application",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True
+    }
+)
+async def wlst_redeploy_application(params: AppOperationInput) -> str:
+    '''Redeploy an application in WebLogic Server (updates the application in place).
+
+    Args:
+        params (AppOperationInput): Application operation parameters
+
+    Returns:
+        str: Operation result message
+    '''
+    script = f'''
+{_build_connect_script(params.get_admin_url(), params.get_username(), params.get_password())}
+
+try:
+    redeploy('{params.app_name}')
+    print('REDEPLOY_SUCCESS: {params.app_name}')
+except Exception as e:
+    print('REDEPLOY_ERROR: ' + str(e))
+
+{_build_disconnect_script()}
+'''
+
+    result = await _execute_wlst_script(script, params.timeout or DEFAULT_TIMEOUT)
+
+    if result['success'] and 'REDEPLOY_SUCCESS' in result['stdout']:
+        return f"Application **{params.app_name}** redeployed successfully."
+
+    if 'REDEPLOY_ERROR' in result['stdout']:
+        error_line = [l for l in result['stdout'].split('\n') if 'REDEPLOY_ERROR' in l]
+        return f"Error redeploying application: {error_line[0].replace('REDEPLOY_ERROR: ', '') if error_line else 'Unknown error'}"
+
+    return _handle_error(result)
+
+@mcp.tool(
     name="wlst_list_applications",
     annotations={
         "title": "List Deployed Applications",
@@ -839,14 +998,64 @@ import json
 {_build_connect_script(params.get_admin_url(), params.get_username(), params.get_password())}
 
 apps = []
+
+# Get targets from serverConfig
+serverConfig()
+cd('AppDeployments')
+appDeploymentsRaw = ls(returnMap='true')
+appDeploymentsList = list(appDeploymentsRaw) if appDeploymentsRaw else []
+
+appTargetsMap = {{}}
+appInfoMap = {{}}
+
+for i in range(len(appDeploymentsList)):
+    appName = str(appDeploymentsList[i])
+
+    # Get targets
+    cd(appName + '/Targets')
+    targetsRaw = ls(returnMap='true')
+    if targetsRaw:
+        appTargetsMap[appName] = [str(t) for t in list(targetsRaw)]
+    else:
+        appTargetsMap[appName] = []
+    cd('../..')
+
+    # Get module type and source path
+    cd(appName)
+    appInfoMap[appName] = {{
+        'moduleType': str(cmo.getModuleType()) if cmo.getModuleType() else 'unknown',
+        'sourcePath': str(cmo.getSourcePath()) if cmo.getSourcePath() else ''
+    }}
+    cd('..')
+
+# Get runtime state from domainRuntime
 domainRuntime()
 cd('AppRuntimeStateRuntime/AppRuntimeStateRuntime')
-appNames = cmo.getApplicationIds()
+appNamesRaw = cmo.getApplicationIds()
+appNamesList = list(appNamesRaw) if appNamesRaw else []
 
-for appName in appNames:
-    state = cmo.getCurrentState(appName)
-    intendedState = cmo.getIntendedState(appName)
-    apps.append({{'name': appName, 'state': state, 'intendedState': intendedState}})
+for i in range(len(appNamesList)):
+    appName = str(appNamesList[i])
+    targetStates = []
+    targets = appTargetsMap.get(appName, [])
+
+    for j in range(len(targets)):
+        targetName = str(targets[j])
+        try:
+            state = cmo.getCurrentState(appName, targetName)
+            targetStates.append({{'target': targetName, 'state': str(state) if state else 'None'}})
+        except:
+            targetStates.append({{'target': targetName, 'state': 'UNKNOWN'}})
+
+    intendedState = str(cmo.getIntendedState(appName))
+    appInfo = appInfoMap.get(appName, {{}})
+    apps.append({{
+        'name': appName,
+        'moduleType': appInfo.get('moduleType', 'unknown'),
+        'sourcePath': appInfo.get('sourcePath', ''),
+        'targets': targetStates,
+        'intendedState': intendedState
+    }})
 
 print('APPS_JSON:' + json.dumps(apps))
 {_build_disconnect_script()}
@@ -873,10 +1082,14 @@ print('APPS_JSON:' + json.dumps(apps))
 
     lines = ["# Deployed Applications", "", f"**Total applications**: {len(apps)}", ""]
     for app in apps:
-        state_emoji = "🟢" if app['state'] == 'STATE_ACTIVE' else "🔴"
-        lines.append(f"- {state_emoji} **{app['name']}**")
-        lines.append(f"  - State: {app['state']}")
-        lines.append(f"  - Intended: {app['intendedState']}")
+        # Use intendedState as the real indicator (getCurrentState has issues in WLS 14.x)
+        intended = app['intendedState']
+        app_emoji = "🟢" if intended == 'STATE_ACTIVE' else "🔴" if intended == 'STATE_PREPARED' else "🟡"
+        lines.append(f"## {app_emoji} **{app['name']}**")
+        lines.append(f"- **Type**: {app.get('moduleType', 'unknown')}")
+        lines.append(f"- **State**: {intended}")
+        lines.append(f"- **Targets**: {', '.join([t['target'] for t in app.get('targets', [])])}")
+        lines.append("")
 
     return '\n'.join(lines)
 
