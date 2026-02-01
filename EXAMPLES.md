@@ -6,6 +6,7 @@ This document provides practical examples for using the WLST MCP Server tools.
 
 - [Server Management](#server-management)
 - [Monitoring & Metrics](#monitoring--metrics)
+- [Log Analysis](#log-analysis)
 - [Application Deployment](#application-deployment)
 - [Resource Management](#resource-management)
 - [Custom Scripts](#custom-scripts)
@@ -181,6 +182,128 @@ Server **test_server1** restarted successfully.
     "server_name": "test_server1"
   }
 }
+```
+
+---
+
+## Log Analysis
+
+### Analyze Server Logs (Last Day)
+
+Analyze logs from the last day to identify restart reasons and errors.
+
+**User prompt:**
+> "Why did test_server1 restart?"
+
+> "Analyze the logs for test_server1"
+
+```json
+{
+  "tool": "wlst_analyze_logs",
+  "params": {
+    "server_name": "test_server1"
+  }
+}
+```
+
+---
+
+### Analyze Logs for Multiple Days
+
+Analyze logs from the last 7 days.
+
+**User prompt:**
+> "Check the logs for test_server1 from the last week"
+
+> "Analyze test_server1 logs for the past 7 days"
+
+```json
+{
+  "tool": "wlst_analyze_logs",
+  "params": {
+    "server_name": "test_server1",
+    "days": 7
+  }
+}
+```
+
+---
+
+### Analyze Only NodeManager Logs
+
+Focus only on NodeManager logs to see restart events and server lifecycle changes.
+
+**User prompt:**
+> "Show me NodeManager events for test_server1"
+
+> "What does the NodeManager log say about test_server1?"
+
+```json
+{
+  "tool": "wlst_analyze_logs",
+  "params": {
+    "server_name": "test_server1",
+    "days": 10,
+    "log_type": "nodemanager"
+  }
+}
+```
+
+---
+
+### Get JSON Output for Automation
+
+Use JSON format for programmatic processing.
+
+```json
+{
+  "tool": "wlst_analyze_logs",
+  "params": {
+    "server_name": "test_server1",
+    "days": 3,
+    "response_format": "json"
+  }
+}
+```
+
+---
+
+### Example Output
+
+```markdown
+# Log Analysis: test_server1
+
+**Time Range**: 2026-01-25 14:00:00 to 2026-02-01 14:00:00
+**Days Analyzed**: 7
+
+## Server Information
+- **Current State**: SHUTDOWN
+- **NodeManager Restart Count**: 0
+- **Auto Restart Enabled**: True
+- **Max Restarts**: 2
+- **Restart Interval**: 3600 seconds
+- **Machine**: my_machine
+
+## Summary
+- **Total Errors Found**: 6
+- **Total Warnings Found**: 0
+- **Restart Events**: 6
+- **NodeManager Events**: 27
+- **OutOfMemory Errors**: No
+- **JVM Crashes**: No
+
+## Probable Restart Reasons
+- No clear restart reason found in analyzed logs
+
+## Errors Found
+- **[WEBLOGIC_ERROR]** (2026-01-25 11:44:59) - test_server1.log
+  `####<25 ene 2026 11:44:59> <Info> <Connector> ...`
+
+## NodeManager Events
+- **[SERVER_FAILED]** (2026-01-22 19:14:29)
+  `<WARNING> <Server start command for WebLogic server 'test_server1' failed...`
+- **[AUTO_RESTART]** (2026-01-22 19:14:27)
+  `<INFO> <Server failed during startup. It may be retried according to the auto restart config...`
 ```
 
 ---

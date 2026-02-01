@@ -366,6 +366,38 @@ class ThreadDumpInput(BaseModel):
     def get_password(self) -> str:
         return self.password or DEFAULT_PASSWORD
 
+class ServerLogsInput(BaseModel):
+    '''Input model for analyzing server logs via NodeManager.'''
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra='forbid')
+
+    admin_url: Optional[str] = Field(default=None, description="Admin Server URL. Uses WLST_ADMIN_URL env var if not provided.")
+    username: Optional[str] = Field(default=None, description="WebLogic admin username. Uses WLST_USERNAME env var if not provided.")
+    password: Optional[str] = Field(default=None, description="WebLogic admin password. Uses WLST_PASSWORD env var if not provided.")
+    server_name: str = Field(..., description="Name of the server to analyze logs for", min_length=1, max_length=100)
+    days: Optional[int] = Field(default=1, description="Number of days to analyze (how far back in time). Default is 1 day.", ge=1, le=30)
+    log_type: Optional[str] = Field(default="all", description="Type of logs to analyze: all, server, nodemanager, stdout")
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="Output format")
+
+    def get_admin_url(self) -> str:
+        return self.admin_url or DEFAULT_ADMIN_URL
+
+    def get_username(self) -> str:
+        return self.username or DEFAULT_USERNAME
+
+    def get_password(self) -> str:
+        return self.password or DEFAULT_PASSWORD
+
+    def get_days(self) -> int:
+        return self.days or 1
+
+    @field_validator('log_type')
+    @classmethod
+    def validate_log_type(cls, v: str) -> str:
+        valid_types = ['all', 'server', 'nodemanager', 'stdout']
+        if v.lower() not in valid_types:
+            raise ValueError(f"log_type must be one of: {', '.join(valid_types)}")
+        return v.lower()
+
 # =============================================================================
 # Utility Functions
 # =============================================================================
@@ -1652,6 +1684,338 @@ async def wlst_execute_script(params: ExecuteScriptInput) -> str:
         return f"Script execution failed:\n\n**STDOUT:**\n```\n{result['stdout']}\n```\n\n**STDERR:**\n```\n{result['stderr']}\n```"
 
     return f"Script executed successfully:\n\n```\n{result['stdout']}\n```"
+
+@mcp.tool(
+    name="wlst_analyze_logs",
+    annotations={
+        "title": "Analyze Server Logs via NodeManager",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def wlst_analyze_logs(params: ServerLogsInput) -> str:
+    '''Analyze WebLogic server logs to identify restart reasons, errors, and issues.
+
+    This tool connects to the Admin Server and retrieves log information for a
+    specified managed server, analyzing logs from the NodeManager and server
+    output to identify restart events, OutOfMemoryErrors, JVM crashes, and
+    other critical issues.
+
+    Args:
+        params (ServerLogsInput): Log analysis parameters including:
+            - server_name (str): Name of the server to analyze
+            - days (int): How many days back to analyze (default: 1, max: 30)
+            - log_type (str): Type of logs: all, server, nodemanager, stdout
+            - response_format: Output format (markdown or json)
+
+    Returns:
+        str: Analysis results with identified issues and restart reasons
+    '''
+    days_to_analyze = params.get_days()
+
+    script = f'''
+import json
+import os
+import re
+from datetime import datetime, timedelta
+from java.util import Date
+from java.text import SimpleDateFormat
+
+{_build_connect_script(params.get_admin_url(), params.get_username(), params.get_password())}
+
+analysis = {{
+    'server_name': '{params.server_name}',
+    'days_analyzed': {days_to_analyze},
+    'log_type': '{params.log_type}',
+    'server_info': {{}},
+    'restart_events': [],
+    'errors': [],
+    'warnings': [],
+    'nodemanager_events': [],
+    'summary': {{}}
+}}
+
+# Get domain home path
+serverConfig()
+domainHome = cmo.getRootDirectory()
+analysis['domain_home'] = str(domainHome)
+
+# Get server configuration
+try:
+    cd('/Servers/{params.server_name}')
+    analysis['server_info']['listen_port'] = cmo.getListenPort()
+    analysis['server_info']['listen_address'] = str(cmo.getListenAddress()) if cmo.getListenAddress() else 'localhost'
+    analysis['server_info']['auto_restart'] = cmo.getAutoRestart()
+    analysis['server_info']['restart_max'] = cmo.getRestartMax()
+    analysis['server_info']['restart_interval_seconds'] = cmo.getRestartIntervalSeconds()
+    machine = cmo.getMachine()
+    if machine:
+        analysis['server_info']['machine'] = machine.getName()
+except Exception as e:
+    analysis['server_info']['error'] = str(e)
+
+# Get current server state and NodeManager restart count
+try:
+    domainRuntime()
+    cd('/ServerLifeCycleRuntimes/{params.server_name}')
+    analysis['server_info']['current_state'] = str(cmo.getState())
+    analysis['server_info']['nm_restart_count'] = cmo.getNodeManagerRestartCount()
+except Exception as e:
+    analysis['server_info']['state_error'] = str(e)
+
+# Calculate time threshold
+cutoff_time = datetime.now() - timedelta(days={days_to_analyze})
+cutoff_str = cutoff_time.strftime('%Y-%m-%d %H:%M:%S')
+analysis['time_range'] = {{'from': cutoff_str, 'to': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}}
+
+# Define log file paths
+server_log_dir = os.path.join(str(domainHome), 'servers', '{params.server_name}', 'logs')
+nm_log_path = os.path.join(str(domainHome), 'nodemanager', 'nodemanager.log')
+
+# Patterns to search for
+restart_patterns = [
+    (r'Starting.*{params.server_name}', 'SERVER_START'),
+    (r'Stopping.*{params.server_name}', 'SERVER_STOP'),
+    (r'Server.*{params.server_name}.*started', 'SERVER_STARTED'),
+    (r'Server.*{params.server_name}.*stopped', 'SERVER_STOPPED'),
+    (r'Server.*{params.server_name}.*failed', 'SERVER_FAILED'),
+    (r'Auto restart', 'AUTO_RESTART'),
+    (r'NodeManager.*restart', 'NM_RESTART'),
+    (r'Process.*crashed', 'PROCESS_CRASH'),
+    (r'Process.*exited', 'PROCESS_EXIT'),
+]
+
+error_patterns = [
+    (r'OutOfMemoryError', 'OUT_OF_MEMORY'),
+    (r'StackOverflowError', 'STACK_OVERFLOW'),
+    (r'java\\.lang\\.Error', 'JAVA_ERROR'),
+    (r'SIGSEGV|SIGKILL|SIGABRT', 'JVM_CRASH'),
+    (r'BEA-\\d+.*Error', 'WEBLOGIC_ERROR'),
+    (r'Exception.*fatal', 'FATAL_EXCEPTION'),
+    (r'Connection refused', 'CONNECTION_REFUSED'),
+    (r'Unable to get file lock', 'FILE_LOCK_ERROR'),
+]
+
+warning_patterns = [
+    (r'BEA-\\d+.*Warning', 'WEBLOGIC_WARNING'),
+    (r'Low memory', 'LOW_MEMORY'),
+    (r'Stuck thread', 'STUCK_THREAD'),
+    (r'overloaded', 'OVERLOADED'),
+]
+
+def parse_log_file(file_path, search_patterns, max_lines=5000):
+    results = []
+    try:
+        if os.path.exists(file_path):
+            with open(file_path, 'r') as f:
+                # Read last max_lines lines
+                lines = f.readlines()[-max_lines:]
+                for line_num, line in enumerate(lines):
+                    for pattern, event_type in search_patterns:
+                        if re.search(pattern, line, re.IGNORECASE):
+                            # Try to extract timestamp
+                            timestamp_match = re.search(r'(\\d{{4}}-\\d{{2}}-\\d{{2}}[T ]\\d{{2}}:\\d{{2}}:\\d{{2}})', line)
+                            timestamp = timestamp_match.group(1) if timestamp_match else 'Unknown'
+                            results.append({{
+                                'type': event_type,
+                                'timestamp': timestamp,
+                                'message': line.strip()[:500],
+                                'source': os.path.basename(file_path)
+                            }})
+                            break
+    except Exception as e:
+        results.append({{'type': 'READ_ERROR', 'message': str(e), 'source': file_path}})
+    return results
+
+# Analyze NodeManager log
+if '{params.log_type}' in ['all', 'nodemanager']:
+    if os.path.exists(nm_log_path):
+        nm_results = parse_log_file(nm_log_path, restart_patterns + error_patterns)
+        for r in nm_results:
+            if r['type'] in ['SERVER_START', 'SERVER_STOP', 'SERVER_STARTED', 'SERVER_STOPPED',
+                            'SERVER_FAILED', 'AUTO_RESTART', 'NM_RESTART', 'PROCESS_CRASH', 'PROCESS_EXIT']:
+                analysis['nodemanager_events'].append(r)
+            elif 'ERROR' in r['type'] or 'CRASH' in r['type'] or 'MEMORY' in r['type']:
+                analysis['errors'].append(r)
+    else:
+        analysis['nodemanager_events'].append({{'type': 'INFO', 'message': 'NodeManager log not found at: ' + nm_log_path}})
+
+# Analyze server log
+if '{params.log_type}' in ['all', 'server']:
+    server_log = os.path.join(server_log_dir, '{params.server_name}.log')
+    if os.path.exists(server_log):
+        server_results = parse_log_file(server_log, error_patterns + warning_patterns + restart_patterns)
+        for r in server_results:
+            if 'ERROR' in r['type'] or 'CRASH' in r['type'] or 'MEMORY' in r['type'] or 'OVERFLOW' in r['type']:
+                analysis['errors'].append(r)
+            elif 'WARNING' in r['type'] or 'STUCK' in r['type'] or 'OVERLOAD' in r['type']:
+                analysis['warnings'].append(r)
+            else:
+                analysis['restart_events'].append(r)
+
+# Analyze stdout/stderr log
+if '{params.log_type}' in ['all', 'stdout']:
+    stdout_log = os.path.join(server_log_dir, '{params.server_name}.out')
+    if os.path.exists(stdout_log):
+        stdout_results = parse_log_file(stdout_log, error_patterns + restart_patterns)
+        for r in stdout_results:
+            if 'ERROR' in r['type'] or 'CRASH' in r['type'] or 'MEMORY' in r['type']:
+                analysis['errors'].append(r)
+            elif r['type'] in ['SERVER_START', 'PROCESS_CRASH', 'PROCESS_EXIT']:
+                analysis['restart_events'].append(r)
+
+# Generate summary
+analysis['summary'] = {{
+    'total_errors': len(analysis['errors']),
+    'total_warnings': len(analysis['warnings']),
+    'total_restart_events': len(analysis['restart_events']),
+    'total_nm_events': len(analysis['nodemanager_events']),
+    'has_oom_errors': any('MEMORY' in e['type'] for e in analysis['errors']),
+    'has_jvm_crashes': any('CRASH' in e['type'] for e in analysis['errors']),
+    'auto_restart_enabled': analysis['server_info'].get('auto_restart', False),
+    'current_state': analysis['server_info'].get('current_state', 'UNKNOWN'),
+    'nm_restart_count': analysis['server_info'].get('nm_restart_count', 0)
+}}
+
+# Determine probable restart reason
+probable_reasons = []
+if analysis['summary']['has_oom_errors']:
+    probable_reasons.append('OutOfMemoryError - JVM ran out of heap space')
+if analysis['summary']['has_jvm_crashes']:
+    probable_reasons.append('JVM Crash - Native code or JVM bug')
+if analysis['summary']['nm_restart_count'] > 0:
+    probable_reasons.append('NodeManager triggered restart (count: ' + str(analysis['summary']['nm_restart_count']) + ')')
+
+# Check for specific error patterns in errors list
+for err in analysis['errors']:
+    if 'FILE_LOCK' in err['type']:
+        probable_reasons.append('File lock issue - another process may be running')
+    if 'CONNECTION_REFUSED' in err['type']:
+        probable_reasons.append('Connection issues - network or Admin Server problems')
+
+analysis['summary']['probable_restart_reasons'] = probable_reasons if probable_reasons else ['No clear restart reason found in analyzed logs']
+
+print('LOGS_JSON:' + json.dumps(analysis))
+{_build_disconnect_script()}
+'''
+
+    result = await _execute_wlst_script(script, days_to_analyze * 10 + DEFAULT_TIMEOUT)
+
+    if not result['success']:
+        return _handle_error(result)
+
+    analysis = None
+    for line in result['stdout'].split('\n'):
+        if 'LOGS_JSON:' in line:
+            try:
+                analysis = json.loads(line.replace('LOGS_JSON:', ''))
+            except:
+                pass
+
+    if not analysis:
+        return "Unable to retrieve or parse log analysis results."
+
+    if params.response_format == ResponseFormat.JSON:
+        return json.dumps(analysis, indent=2)
+
+    # Format as Markdown
+    lines = [
+        f"# Log Analysis: {params.server_name}",
+        "",
+        f"**Time Range**: {analysis.get('time_range', {}).get('from', 'N/A')} to {analysis.get('time_range', {}).get('to', 'N/A')}",
+        f"**Days Analyzed**: {days_to_analyze}",
+        ""
+    ]
+
+    # Server Info
+    server_info = analysis.get('server_info', {})
+    lines.extend([
+        "## Server Information",
+        f"- **Current State**: {server_info.get('current_state', 'Unknown')}",
+        f"- **NodeManager Restart Count**: {server_info.get('nm_restart_count', 0)}",
+        f"- **Auto Restart Enabled**: {server_info.get('auto_restart', False)}",
+        f"- **Max Restarts**: {server_info.get('restart_max', 'N/A')}",
+        f"- **Restart Interval**: {server_info.get('restart_interval_seconds', 'N/A')} seconds",
+        f"- **Machine**: {server_info.get('machine', 'N/A')}",
+        ""
+    ])
+
+    # Summary
+    summary = analysis.get('summary', {})
+    lines.extend([
+        "## Summary",
+        f"- **Total Errors Found**: {summary.get('total_errors', 0)}",
+        f"- **Total Warnings Found**: {summary.get('total_warnings', 0)}",
+        f"- **Restart Events**: {summary.get('total_restart_events', 0)}",
+        f"- **NodeManager Events**: {summary.get('total_nm_events', 0)}",
+        f"- **OutOfMemory Errors**: {'Yes' if summary.get('has_oom_errors') else 'No'}",
+        f"- **JVM Crashes**: {'Yes' if summary.get('has_jvm_crashes') else 'No'}",
+        ""
+    ])
+
+    # Probable Restart Reasons
+    reasons = summary.get('probable_restart_reasons', [])
+    lines.extend([
+        "## Probable Restart Reasons",
+    ])
+    if reasons:
+        for reason in reasons:
+            lines.append(f"- {reason}")
+    else:
+        lines.append("- No clear restart reason identified")
+    lines.append("")
+
+    # Errors
+    errors = analysis.get('errors', [])
+    if errors:
+        lines.extend([
+            "## Errors Found",
+        ])
+        for err in errors[:20]:  # Limit to 20
+            lines.append(f"- **[{err.get('type', 'ERROR')}]** ({err.get('timestamp', 'N/A')}) - {err.get('source', 'unknown')}")
+            lines.append(f"  `{err.get('message', '')[:200]}...`" if len(err.get('message', '')) > 200 else f"  `{err.get('message', '')}`")
+        if len(errors) > 20:
+            lines.append(f"  ... and {len(errors) - 20} more errors")
+        lines.append("")
+
+    # NodeManager Events
+    nm_events = analysis.get('nodemanager_events', [])
+    if nm_events:
+        lines.extend([
+            "## NodeManager Events",
+        ])
+        for evt in nm_events[:15]:  # Limit to 15
+            lines.append(f"- **[{evt.get('type', 'EVENT')}]** ({evt.get('timestamp', 'N/A')})")
+            if evt.get('message'):
+                lines.append(f"  `{evt.get('message', '')[:150]}...`" if len(evt.get('message', '')) > 150 else f"  `{evt.get('message', '')}`")
+        if len(nm_events) > 15:
+            lines.append(f"  ... and {len(nm_events) - 15} more events")
+        lines.append("")
+
+    # Warnings
+    warnings = analysis.get('warnings', [])
+    if warnings:
+        lines.extend([
+            "## Warnings Found",
+        ])
+        for warn in warnings[:10]:  # Limit to 10
+            lines.append(f"- **[{warn.get('type', 'WARNING')}]** ({warn.get('timestamp', 'N/A')}) - `{warn.get('message', '')[:100]}`")
+        if len(warnings) > 10:
+            lines.append(f"  ... and {len(warnings) - 10} more warnings")
+        lines.append("")
+
+    # Log paths for reference
+    lines.extend([
+        "## Log Paths Analyzed",
+        f"- Domain Home: `{analysis.get('domain_home', 'N/A')}`",
+        f"- NodeManager Log: `$DOMAIN_HOME/nodemanager/nodemanager.log`",
+        f"- Server Log: `$DOMAIN_HOME/servers/{params.server_name}/logs/{params.server_name}.log`",
+        f"- Server Output: `$DOMAIN_HOME/servers/{params.server_name}/logs/{params.server_name}.out`",
+    ])
+
+    return '\n'.join(lines)
 
 
 # =============================================================================

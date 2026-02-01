@@ -57,7 +57,8 @@ wlst-mcp/
 - **Server Management**: Start, stop, restart, and monitor WebLogic servers
 - **Application Deployment**: Deploy, undeploy, and list applications
 - **Monitoring**: Real-time metrics for JVM, threads, JDBC, and JMS
-- **Diagnostics**: Thread dumps and health checks
+- **Diagnostics**: Thread dumps, health checks, and log analysis
+- **Log Analysis**: Analyze server and NodeManager logs to identify restart reasons, errors, and issues
 - **Resource Management**: JDBC datasources and JMS resources
 - **Custom Scripting**: Execute custom WLST/Jython scripts
 
@@ -108,6 +109,7 @@ wlst-mcp/
 | Tool | Description |
 |------|-------------|
 | `wlst_thread_dump` | Capture thread dump for debugging |
+| `wlst_analyze_logs` | Analyze server and NodeManager logs to identify restart reasons and errors |
 | `wlst_execute_script` | Execute custom WLST/Jython scripts |
 
 ## Tool Reference
@@ -365,6 +367,40 @@ Get a thread dump from a WebLogic server for debugging.
 | `admin_url` | string | No | Admin Server URL |
 | `username` | string | No | WebLogic admin username |
 | `password` | string | No | WebLogic admin password |
+
+---
+
+### wlst_analyze_logs
+
+Analyze WebLogic server logs to identify restart reasons, errors, and issues. This tool examines NodeManager logs, server logs, and stdout/stderr output to detect OutOfMemoryErrors, JVM crashes, auto-restart events, and other critical issues.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `server_name` | string | **Yes** | Name of the server to analyze logs for |
+| `days` | integer | No | Number of days to analyze (how far back in time). Range: 1-30, default: 1 |
+| `log_type` | string | No | Type of logs to analyze: `all`, `server`, `nodemanager`, `stdout` (default: `all`) |
+| `admin_url` | string | No | Admin Server URL |
+| `username` | string | No | WebLogic admin username |
+| `password` | string | No | WebLogic admin password |
+| `response_format` | string | No | Output format: `markdown` or `json` (default: `markdown`) |
+
+**Log Types:**
+| Type | Description |
+|------|-------------|
+| `all` | Analyze all available logs (default) |
+| `server` | Server log only (`<server_name>.log`) |
+| `nodemanager` | NodeManager log only (`nodemanager.log`) |
+| `stdout` | Server stdout/stderr only (`<server_name>.out`) |
+
+**Detected Patterns:**
+| Category | Patterns Detected |
+|----------|-------------------|
+| **Restart Events** | Server start/stop, auto-restart triggers, process crashes |
+| **Memory Errors** | OutOfMemoryError, StackOverflowError |
+| **JVM Crashes** | SIGSEGV, SIGKILL, SIGABRT signals |
+| **WebLogic Errors** | BEA-XXXXX error codes |
+| **Warnings** | Stuck threads, low memory, overload conditions |
 
 ---
 

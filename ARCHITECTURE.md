@@ -48,7 +48,8 @@ This document describes how the WLST MCP Server integrates with Claude and WebLo
 │  │  │   Tools     │ │   Tools     │ │                              │         │  │
 │  │  ├─────────────┤ ├─────────────┤ │  WLST_ADMIN_URL=t3://...    │         │  │
 │  │  │server_health│ │thread_dump  │ │  WLST_USERNAME=weblogic      │         │  │
-│  │  │server_metric│ │exec_script  │ │  WLST_PASSWORD=*****         │         │  │
+│  │  │server_metric│ │analyze_logs │ │  WLST_PASSWORD=*****         │         │  │
+│  │  │             │ │exec_script  │ │                              │         │  │
 │  │  └─────────────┘ └─────────────┘ └──────────────────────────────┘         │  │
 │  │                                                                            │  │
 │  └────────────────────────────────────────────────────────────────────────────┘  │
