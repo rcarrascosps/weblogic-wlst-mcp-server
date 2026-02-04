@@ -398,6 +398,33 @@ class ServerLogsInput(BaseModel):
             raise ValueError(f"log_type must be one of: {', '.join(valid_types)}")
         return v.lower()
 
+class AppDiagnosticInput(BaseModel):
+    '''Input model for application diagnostics.'''
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra='forbid')
+
+    admin_url: Optional[str] = Field(default=None, description="Admin Server URL. Uses WLST_ADMIN_URL env var if not provided.")
+    username: Optional[str] = Field(default=None, description="WebLogic admin username. Uses WLST_USERNAME env var if not provided.")
+    password: Optional[str] = Field(default=None, description="WebLogic admin password. Uses WLST_PASSWORD env var if not provided.")
+    app_name: Optional[str] = Field(
+        default=None,
+        description="Application name to diagnose. If not provided, diagnoses all applications in FAILED state.",
+        max_length=200
+    )
+    check_logs: Optional[bool] = Field(
+        default=True,
+        description="Search server logs for related errors (may take longer)"
+    )
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="Output format")
+
+    def get_admin_url(self) -> str:
+        return self.admin_url or DEFAULT_ADMIN_URL
+
+    def get_username(self) -> str:
+        return self.username or DEFAULT_USERNAME
+
+    def get_password(self) -> str:
+        return self.password or DEFAULT_PASSWORD
+
 # =============================================================================
 # Utility Functions
 # =============================================================================
@@ -1114,13 +1141,44 @@ print('APPS_JSON:' + json.dumps(apps))
 
     lines = ["# Deployed Applications", "", f"**Total applications**: {len(apps)}", ""]
     for app in apps:
-        # Use intendedState as the real indicator (getCurrentState has issues in WLS 14.x)
-        intended = app['intendedState']
-        app_emoji = "🟢" if intended == 'STATE_ACTIVE' else "🔴" if intended == 'STATE_PREPARED' else "🟡"
+        # Get the actual runtime state from targets (getCurrentState), not intendedState
+        targets = app.get('targets', [])
+        target_states = [t.get('state', 'UNKNOWN') for t in targets]
+
+        # Determine overall app state based on target states
+        # If any target shows FAILED, the app is failed
+        # If all targets show STATE_ACTIVE, the app is active
+        has_failed = any('FAILED' in s.upper() for s in target_states)
+        has_active = any('STATE_ACTIVE' in s for s in target_states)
+        has_prepared = any('STATE_PREPARED' in s for s in target_states)
+
+        if has_failed:
+            app_emoji = "🔴"
+            overall_state = "STATE_FAILED"
+        elif has_active and not has_prepared:
+            app_emoji = "🟢"
+            overall_state = "STATE_ACTIVE"
+        elif has_prepared:
+            app_emoji = "🟡"
+            overall_state = "STATE_PREPARED"
+        else:
+            app_emoji = "🟡"
+            overall_state = target_states[0] if target_states else "UNKNOWN"
+
         lines.append(f"## {app_emoji} **{app['name']}**")
         lines.append(f"- **Type**: {app.get('moduleType', 'unknown')}")
-        lines.append(f"- **State**: {intended}")
-        lines.append(f"- **Targets**: {', '.join([t['target'] for t in app.get('targets', [])])}")
+        lines.append(f"- **State**: {overall_state}")
+
+        # Show per-target state if there are multiple targets or if state differs from intended
+        intended = app.get('intendedState', 'UNKNOWN')
+        if len(targets) > 1 or overall_state != intended:
+            for t in targets:
+                target_emoji = "🟢" if t.get('state') == 'STATE_ACTIVE' else "🔴" if 'FAILED' in t.get('state', '').upper() else "🟡"
+                lines.append(f"  - {target_emoji} {t['target']}: {t.get('state', 'UNKNOWN')}")
+            if overall_state != intended:
+                lines.append(f"- **Intended State**: {intended}")
+        else:
+            lines.append(f"- **Targets**: {', '.join([t['target'] for t in targets])}")
         lines.append("")
 
     return '\n'.join(lines)
@@ -2013,6 +2071,409 @@ print('LOGS_JSON:' + json.dumps(analysis))
         f"- NodeManager Log: `$DOMAIN_HOME/nodemanager/nodemanager.log`",
         f"- Server Log: `$DOMAIN_HOME/servers/{params.server_name}/logs/{params.server_name}.log`",
         f"- Server Output: `$DOMAIN_HOME/servers/{params.server_name}/logs/{params.server_name}.out`",
+    ])
+
+    return '\n'.join(lines)
+
+
+@mcp.tool(
+    name="wlst_diagnose_application",
+    annotations={
+        "title": "Diagnose Application Issues",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def wlst_diagnose_application(params: AppDiagnosticInput) -> str:
+    '''Diagnose why an application is in FAILED state or having issues.
+
+    This tool performs comprehensive diagnostics on WebLogic applications including:
+    - Checking current vs intended state
+    - Verifying source files exist
+    - Searching logs for related errors
+    - Identifying probable causes
+    - Providing remediation suggestions
+
+    Args:
+        params (AppDiagnosticInput): Diagnostic parameters including:
+            - app_name (Optional[str]): Application to diagnose. If not provided, diagnoses all FAILED apps.
+            - check_logs (bool): Whether to search logs for errors (default: True)
+            - response_format: Output format (markdown or json)
+
+    Returns:
+        str: Diagnostic report with findings and recommendations
+    '''
+    app_filter = f"app_name = '{params.app_name}'" if params.app_name else "app_name = None"
+    check_logs_flag = "True" if params.check_logs else "False"
+
+    script = f'''
+import json
+import os
+import re
+
+{_build_connect_script(params.get_admin_url(), params.get_username(), params.get_password())}
+
+diagnostics = {{
+    'apps_analyzed': [],
+    'summary': {{
+        'total_analyzed': 0,
+        'total_failed': 0,
+        'total_issues_found': 0
+    }}
+}}
+
+# Get domain home
+serverConfig()
+domainHome = str(cmo.getRootDirectory())
+diagnostics['domain_home'] = domainHome
+
+# Get all app deployments info
+cd('AppDeployments')
+appDeploymentsRaw = ls(returnMap='true')
+appDeploymentsList = list(appDeploymentsRaw) if appDeploymentsRaw else []
+
+# Build app config map
+appConfigMap = {{}}
+for appName in appDeploymentsList:
+    cd(appName)
+    appConfigMap[str(appName)] = {{
+        'sourcePath': str(cmo.getSourcePath()) if cmo.getSourcePath() else '',
+        'stagingMode': str(cmo.getStagingMode()) if cmo.getStagingMode() else 'default',
+        'planPath': str(cmo.getPlanPath()) if cmo.getPlanPath() else None,
+        'deploymentOrder': cmo.getDeploymentOrder()
+    }}
+    # Get targets
+    cd('Targets')
+    targetsRaw = ls(returnMap='true')
+    appConfigMap[str(appName)]['targets'] = [str(t) for t in list(targetsRaw)] if targetsRaw else []
+    cd('../..')
+
+# Get runtime states
+domainRuntime()
+cd('AppRuntimeStateRuntime/AppRuntimeStateRuntime')
+appNamesRaw = cmo.getApplicationIds()
+appNamesList = list(appNamesRaw) if appNamesRaw else []
+
+# Filter apps to analyze
+{app_filter}
+if app_name:
+    apps_to_analyze = [app_name] if app_name in appNamesList else []
+    if not apps_to_analyze:
+        print('DIAG_JSON:' + json.dumps({{'error': 'Application not found: ' + app_name}}))
+        disconnect()
+        exit()
+else:
+    # Find all FAILED apps
+    apps_to_analyze = []
+    for appName in appNamesList:
+        targets = appConfigMap.get(str(appName), {{}}).get('targets', [])
+        for target in targets:
+            try:
+                state = str(cmo.getCurrentState(str(appName), str(target)))
+                if 'FAILED' in state.upper():
+                    if str(appName) not in apps_to_analyze:
+                        apps_to_analyze.append(str(appName))
+            except:
+                pass
+
+diagnostics['summary']['total_analyzed'] = len(apps_to_analyze)
+
+# Analyze each app
+for appName in apps_to_analyze:
+    appDiag = {{
+        'name': appName,
+        'issues': [],
+        'probable_causes': [],
+        'suggestions': [],
+        'log_errors': []
+    }}
+
+    config = appConfigMap.get(appName, {{}})
+    appDiag['config'] = config
+
+    # Get current state per target
+    targets = config.get('targets', [])
+    target_states = []
+    for target in targets:
+        try:
+            state = str(cmo.getCurrentState(appName, target))
+            target_states.append({{'target': target, 'state': state}})
+        except Exception as e:
+            target_states.append({{'target': target, 'state': 'ERROR', 'error': str(e)}})
+
+    appDiag['target_states'] = target_states
+    appDiag['intended_state'] = str(cmo.getIntendedState(appName))
+
+    # Check if any target is FAILED
+    has_failed = any('FAILED' in ts.get('state', '').upper() for ts in target_states)
+    if has_failed:
+        diagnostics['summary']['total_failed'] += 1
+
+    # DIAGNOSTIC 1: Check if source file exists
+    sourcePath = config.get('sourcePath', '')
+    if sourcePath:
+        # Handle relative paths
+        if not os.path.isabs(sourcePath):
+            fullPath = os.path.join(domainHome, sourcePath)
+        else:
+            fullPath = sourcePath
+
+        appDiag['source_path_full'] = fullPath
+        source_exists = os.path.exists(fullPath)
+        appDiag['source_exists'] = source_exists
+
+        if not source_exists:
+            appDiag['issues'].append('SOURCE_FILE_MISSING')
+            appDiag['probable_causes'].append('The application source file (WAR/EAR) does not exist at: ' + fullPath)
+            appDiag['suggestions'].append('Re-deploy the application with a valid source file path')
+            appDiag['suggestions'].append('Or copy the application archive to: ' + fullPath)
+            diagnostics['summary']['total_issues_found'] += 1
+    else:
+        appDiag['issues'].append('NO_SOURCE_PATH')
+        appDiag['probable_causes'].append('Application has no source path configured')
+
+    # DIAGNOSTIC 2: Check staging directory if staging mode is used
+    stagingMode = config.get('stagingMode', '')
+    if stagingMode and stagingMode.lower() == 'stage':
+        for target in targets:
+            stagePath = os.path.join(domainHome, 'servers', target, 'stage', appName)
+            if os.path.exists(stagePath):
+                appDiag['staging_path'] = stagePath
+                appDiag['staging_exists'] = True
+            else:
+                appDiag['staging_exists'] = False
+                if 'SOURCE_FILE_MISSING' not in appDiag['issues']:
+                    appDiag['issues'].append('STAGING_MISSING')
+                    appDiag['probable_causes'].append('Staged files not found at: ' + stagePath)
+
+    # DIAGNOSTIC 3: Search logs for errors (if enabled)
+    check_logs = {check_logs_flag}
+    if check_logs and has_failed:
+        log_errors = []
+        appNameLower = appName.lower()
+
+        # Search in server logs for each target
+        for target in targets:
+            server_log = os.path.join(domainHome, 'servers', target, 'logs', target + '.log')
+            server_out = os.path.join(domainHome, 'servers', target, 'logs', target + '.out')
+
+            for log_file in [server_log, server_out]:
+                if os.path.exists(log_file):
+                    try:
+                        f = open(log_file, 'r')
+                        lines = f.readlines()
+                        f.close()
+                        # Search last 2000 lines
+                        for line in lines[-2000:]:
+                            lineLower = line.lower()
+                            if appNameLower in lineLower:
+                                # Check for error indicators
+                                if any(err in lineLower for err in ['error', 'exception', 'failed', 'unable']):
+                                    log_errors.append({{
+                                        'source': os.path.basename(log_file),
+                                        'message': line.strip()[:300]
+                                    }})
+                                    if len(log_errors) >= 10:
+                                        break
+                    except:
+                        pass
+                if len(log_errors) >= 10:
+                    break
+
+        # Also search AdminServer log
+        admin_log = os.path.join(domainHome, 'servers', 'AdminServer', 'logs', 'AdminServer.log')
+        if os.path.exists(admin_log) and len(log_errors) < 10:
+            try:
+                f = open(admin_log, 'r')
+                lines = f.readlines()
+                f.close()
+                for line in lines[-1000:]:
+                    lineLower = line.lower()
+                    if appNameLower in lineLower:
+                        if any(err in lineLower for err in ['error', 'exception', 'failed', 'unable', 'bea-149']):
+                            log_errors.append({{
+                                'source': 'AdminServer.log',
+                                'message': line.strip()[:300]
+                            }})
+                            if len(log_errors) >= 10:
+                                break
+            except:
+                pass
+
+        appDiag['log_errors'] = log_errors
+
+        # Analyze log errors for common patterns
+        for err in log_errors:
+            msg = err.get('message', '').lower()
+            if 'classnotfound' in msg or 'noclassdeffounderror' in msg:
+                if 'CLASS_NOT_FOUND' not in appDiag['issues']:
+                    appDiag['issues'].append('CLASS_NOT_FOUND')
+                    appDiag['probable_causes'].append('Missing class or JAR dependency')
+                    appDiag['suggestions'].append('Check application dependencies and ensure all required JARs are included')
+            elif 'outofmemory' in msg:
+                if 'OUT_OF_MEMORY' not in appDiag['issues']:
+                    appDiag['issues'].append('OUT_OF_MEMORY')
+                    appDiag['probable_causes'].append('JVM ran out of memory during deployment')
+                    appDiag['suggestions'].append('Increase JVM heap size (-Xmx) for the target server')
+            elif 'connection refused' in msg or 'socket' in msg:
+                if 'CONNECTION_ERROR' not in appDiag['issues']:
+                    appDiag['issues'].append('CONNECTION_ERROR')
+                    appDiag['probable_causes'].append('Network or database connection issue during startup')
+                    appDiag['suggestions'].append('Verify database/external service connectivity')
+            elif 'duplicate' in msg or 'already exists' in msg:
+                if 'DUPLICATE_RESOURCE' not in appDiag['issues']:
+                    appDiag['issues'].append('DUPLICATE_RESOURCE')
+                    appDiag['probable_causes'].append('Duplicate resource or naming conflict')
+                    appDiag['suggestions'].append('Check for duplicate JNDI names or resource definitions')
+
+    # Add generic suggestions if no specific issues found
+    if not appDiag['issues'] and has_failed:
+        appDiag['issues'].append('UNKNOWN')
+        appDiag['probable_causes'].append('Could not determine specific cause from available information')
+        appDiag['suggestions'].append('Check server logs manually for detailed error messages')
+        appDiag['suggestions'].append('Try to redeploy the application')
+        appDiag['suggestions'].append('Verify all application dependencies are available')
+
+    diagnostics['apps_analyzed'].append(appDiag)
+
+print('DIAG_JSON:' + json.dumps(diagnostics))
+{_build_disconnect_script()}
+'''
+
+    result = await _execute_wlst_script(script, DEFAULT_TIMEOUT * 2)
+
+    if not result['success']:
+        return _handle_error(result)
+
+    diagnostics = None
+    for line in result['stdout'].split('\n'):
+        if 'DIAG_JSON:' in line:
+            try:
+                diagnostics = json.loads(line.replace('DIAG_JSON:', ''))
+            except:
+                pass
+
+    if not diagnostics:
+        return "Unable to retrieve diagnostic information."
+
+    if 'error' in diagnostics:
+        return f"Error: {diagnostics['error']}"
+
+    if params.response_format == ResponseFormat.JSON:
+        return json.dumps(diagnostics, indent=2)
+
+    # Format as Markdown
+    lines = ["# Application Diagnostics Report", ""]
+
+    summary = diagnostics.get('summary', {})
+    lines.extend([
+        "## Summary",
+        f"- **Applications Analyzed**: {summary.get('total_analyzed', 0)}",
+        f"- **Applications in FAILED State**: {summary.get('total_failed', 0)}",
+        f"- **Total Issues Found**: {summary.get('total_issues_found', 0)}",
+        ""
+    ])
+
+    if not diagnostics.get('apps_analyzed'):
+        if params.app_name:
+            lines.append(f"Application **{params.app_name}** was not found or has no issues.")
+        else:
+            lines.append("No applications in FAILED state were found.")
+        return '\n'.join(lines)
+
+    for app in diagnostics.get('apps_analyzed', []):
+        app_name = app.get('name', 'Unknown')
+        issues = app.get('issues', [])
+
+        # Determine status emoji
+        if 'SOURCE_FILE_MISSING' in issues:
+            status_emoji = "🔴"
+        elif issues and issues != ['UNKNOWN']:
+            status_emoji = "🟠"
+        elif not issues:
+            status_emoji = "🟢"
+        else:
+            status_emoji = "🟡"
+
+        lines.extend([
+            f"## {status_emoji} {app_name}",
+            ""
+        ])
+
+        # Current state
+        lines.append("### State")
+        for ts in app.get('target_states', []):
+            state_emoji = "🟢" if ts.get('state') == 'STATE_ACTIVE' else "🔴" if 'FAILED' in ts.get('state', '').upper() else "🟡"
+            lines.append(f"- {state_emoji} **{ts.get('target')}**: {ts.get('state')}")
+        lines.append(f"- **Intended State**: {app.get('intended_state', 'N/A')}")
+        lines.append("")
+
+        # Source file check
+        lines.append("### Source File")
+        source_path = app.get('source_path_full', app.get('config', {}).get('sourcePath', 'N/A'))
+        source_exists = app.get('source_exists', None)
+        if source_exists is True:
+            lines.append(f"- ✅ **Path**: `{source_path}`")
+            lines.append("- ✅ **File Exists**: Yes")
+        elif source_exists is False:
+            lines.append(f"- **Path**: `{source_path}`")
+            lines.append("- ❌ **File Exists**: No")
+        else:
+            lines.append(f"- **Path**: `{source_path}`")
+        lines.append("")
+
+        # Issues found
+        if issues:
+            lines.append("### Issues Found")
+            issue_descriptions = {
+                'SOURCE_FILE_MISSING': '❌ Source file (WAR/EAR) not found on filesystem',
+                'NO_SOURCE_PATH': '⚠️ No source path configured',
+                'STAGING_MISSING': '⚠️ Staged files not found',
+                'CLASS_NOT_FOUND': '❌ Missing class or JAR dependency',
+                'OUT_OF_MEMORY': '❌ Out of memory during deployment',
+                'CONNECTION_ERROR': '❌ Connection error (database/network)',
+                'DUPLICATE_RESOURCE': '⚠️ Duplicate resource or naming conflict',
+                'UNKNOWN': '❓ Unknown issue - manual investigation needed'
+            }
+            for issue in issues:
+                lines.append(f"- {issue_descriptions.get(issue, issue)}")
+            lines.append("")
+
+        # Probable causes
+        causes = app.get('probable_causes', [])
+        if causes:
+            lines.append("### Probable Causes")
+            for cause in causes:
+                lines.append(f"- {cause}")
+            lines.append("")
+
+        # Suggestions
+        suggestions = app.get('suggestions', [])
+        if suggestions:
+            lines.append("### Recommendations")
+            for i, suggestion in enumerate(suggestions, 1):
+                lines.append(f"{i}. {suggestion}")
+            lines.append("")
+
+        # Log errors
+        log_errors = app.get('log_errors', [])
+        if log_errors:
+            lines.append("### Related Log Entries")
+            for err in log_errors[:5]:  # Show max 5
+                lines.append(f"- **[{err.get('source', 'unknown')}]**")
+                lines.append(f"  ```")
+                lines.append(f"  {err.get('message', '')[:200]}")
+                lines.append(f"  ```")
+            if len(log_errors) > 5:
+                lines.append(f"- ... and {len(log_errors) - 5} more entries")
+            lines.append("")
+
+    # Footer
+    lines.extend([
+        "---",
+        f"*Domain: `{diagnostics.get('domain_home', 'N/A')}`*"
     ])
 
     return '\n'.join(lines)

@@ -7,6 +7,7 @@ This document provides practical examples for using the WLST MCP Server tools.
 - [Server Management](#server-management)
 - [Monitoring & Metrics](#monitoring--metrics)
 - [Log Analysis](#log-analysis)
+- [Application Diagnostics](#application-diagnostics)
 - [Application Deployment](#application-deployment)
 - [Resource Management](#resource-management)
 - [Custom Scripts](#custom-scripts)
@@ -305,6 +306,148 @@ Use JSON format for programmatic processing.
 - **[AUTO_RESTART]** (2026-01-22 19:14:27)
   `<INFO> <Server failed during startup. It may be retried according to the auto restart config...`
 ```
+
+---
+
+## Application Diagnostics
+
+### Diagnose a Specific Application
+
+Diagnose why a specific application is in FAILED state.
+
+**User prompt:**
+> "Why is simpleservlet failing?"
+
+> "Diagnose the application simpleservlet"
+
+> "What's wrong with myapp?"
+
+```json
+{
+  "tool": "wlst_diagnose_application",
+  "params": {
+    "app_name": "simpleservlet"
+  }
+}
+```
+
+**Example Output:**
+```markdown
+# Application Diagnostics Report
+
+## Summary
+- **Applications Analyzed**: 1
+- **Applications in FAILED State**: 1
+- **Total Issues Found**: 1
+
+## 🔴 simpleservlet
+
+### State
+- 🔴 **test_server1**: STATE_FAILED
+- **Intended State**: STATE_ACTIVE
+
+### Source File
+- **Path**: `servers\AdminServer\upload\simpleservlet\app\simpleservlet.war`
+- ❌ **File Exists**: No
+
+### Issues Found
+- ❌ Source file (WAR/EAR) not found on filesystem
+
+### Probable Causes
+- The application source file (WAR/EAR) does not exist at: C:\domains\base_domain\servers\AdminServer\upload\simpleservlet\app\simpleservlet.war
+
+### Recommendations
+1. Re-deploy the application with a valid source file path
+2. Or copy the application archive to the expected location
+```
+
+---
+
+### Diagnose All Failed Applications
+
+If no application name is provided, the tool automatically finds and diagnoses all applications in FAILED state.
+
+**User prompt:**
+> "Why are my applications failing?"
+
+> "Diagnose all failed applications"
+
+> "Check what's wrong with my deployments"
+
+```json
+{
+  "tool": "wlst_diagnose_application",
+  "params": {}
+}
+```
+
+---
+
+### Diagnose Without Log Search
+
+Skip log analysis for faster results when you only need to check file existence and state.
+
+**User prompt:**
+> "Quick check on simpleservlet"
+
+```json
+{
+  "tool": "wlst_diagnose_application",
+  "params": {
+    "app_name": "simpleservlet",
+    "check_logs": false
+  }
+}
+```
+
+---
+
+### Get JSON Output for Automation
+
+```json
+{
+  "tool": "wlst_diagnose_application",
+  "params": {
+    "app_name": "myapp",
+    "response_format": "json"
+  }
+}
+```
+
+**Example JSON Output:**
+```json
+{
+  "apps_analyzed": [
+    {
+      "name": "simpleservlet",
+      "issues": ["SOURCE_FILE_MISSING"],
+      "probable_causes": ["The application source file (WAR/EAR) does not exist..."],
+      "suggestions": ["Re-deploy the application with a valid source file path"],
+      "target_states": [{"target": "test_server1", "state": "STATE_FAILED"}],
+      "intended_state": "STATE_ACTIVE",
+      "source_exists": false,
+      "source_path_full": "C:\\domains\\base_domain\\servers\\AdminServer\\upload\\simpleservlet\\app\\simpleservlet.war"
+    }
+  ],
+  "summary": {
+    "total_analyzed": 1,
+    "total_failed": 1,
+    "total_issues_found": 1
+  }
+}
+```
+
+---
+
+### Common Issues Detected
+
+| Issue | Description | Common Cause |
+|-------|-------------|--------------|
+| `SOURCE_FILE_MISSING` | WAR/EAR file not found | File deleted, moved, or wrong path |
+| `CLASS_NOT_FOUND` | Missing Java class | Missing JAR dependency |
+| `OUT_OF_MEMORY` | JVM heap exhausted | Application too large, memory leak |
+| `CONNECTION_ERROR` | Database/network issue | Database down, wrong credentials |
+| `DUPLICATE_RESOURCE` | Resource conflict | Duplicate JNDI name |
 
 ---
 

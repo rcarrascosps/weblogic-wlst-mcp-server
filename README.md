@@ -56,6 +56,7 @@ wlst-mcp/
 
 - **Server Management**: Start, stop, restart, and monitor WebLogic servers
 - **Application Deployment**: Deploy, undeploy, and list applications
+- **Application Diagnostics**: Diagnose failed applications with root cause analysis and remediation suggestions
 - **Monitoring**: Real-time metrics for JVM, threads, JDBC, and JMS
 - **Diagnostics**: Thread dumps, health checks, and log analysis
 - **Log Analysis**: Analyze server and NodeManager logs to identify restart reasons, errors, and issues
@@ -110,6 +111,7 @@ wlst-mcp/
 |------|-------------|
 | `wlst_thread_dump` | Capture thread dump for debugging |
 | `wlst_analyze_logs` | Analyze server and NodeManager logs to identify restart reasons and errors |
+| `wlst_diagnose_application` | Diagnose why an application is in FAILED state with root cause analysis |
 | `wlst_execute_script` | Execute custom WLST/Jython scripts |
 
 ## Tool Reference
@@ -401,6 +403,71 @@ Analyze WebLogic server logs to identify restart reasons, errors, and issues. Th
 | **JVM Crashes** | SIGSEGV, SIGKILL, SIGABRT signals |
 | **WebLogic Errors** | BEA-XXXXX error codes |
 | **Warnings** | Stuck threads, low memory, overload conditions |
+
+---
+
+### wlst_diagnose_application
+
+Diagnose why an application is in FAILED state or having issues. This tool performs comprehensive diagnostics including checking source files, analyzing logs, and providing remediation suggestions.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `app_name` | string | No | Application name to diagnose. If not provided, diagnoses all applications in FAILED state |
+| `check_logs` | boolean | No | Search server logs for related errors (default: `true`) |
+| `admin_url` | string | No | Admin Server URL |
+| `username` | string | No | WebLogic admin username |
+| `password` | string | No | WebLogic admin password |
+| `response_format` | string | No | Output format: `markdown` or `json` (default: `markdown`) |
+
+**Diagnostics Performed:**
+| Check | Description |
+|-------|-------------|
+| **State Analysis** | Compares current runtime state vs intended state for each target |
+| **Source File Check** | Verifies the application archive (WAR/EAR) exists on the filesystem |
+| **Staging Check** | Verifies staged files exist for applications using stage mode |
+| **Log Analysis** | Searches server and AdminServer logs for related errors |
+| **Pattern Detection** | Identifies common issues (ClassNotFound, OutOfMemory, connection errors) |
+
+**Issues Detected:**
+| Issue Code | Description |
+|------------|-------------|
+| `SOURCE_FILE_MISSING` | The application WAR/EAR file does not exist at the configured path |
+| `STAGING_MISSING` | Staged files not found in the server's stage directory |
+| `CLASS_NOT_FOUND` | Missing class or JAR dependency (ClassNotFoundException) |
+| `OUT_OF_MEMORY` | JVM ran out of memory during deployment |
+| `CONNECTION_ERROR` | Network or database connection issue during startup |
+| `DUPLICATE_RESOURCE` | Duplicate JNDI name or resource conflict |
+
+**Example Output:**
+```markdown
+# Application Diagnostics Report
+
+## Summary
+- **Applications Analyzed**: 1
+- **Applications in FAILED State**: 1
+- **Total Issues Found**: 1
+
+## 🔴 simpleservlet
+
+### State
+- 🔴 **test_server1**: STATE_FAILED
+- **Intended State**: STATE_ACTIVE
+
+### Source File
+- **Path**: `servers\AdminServer\upload\simpleservlet\app\simpleservlet.war`
+- ❌ **File Exists**: No
+
+### Issues Found
+- ❌ Source file (WAR/EAR) not found on filesystem
+
+### Probable Causes
+- The application source file (WAR/EAR) does not exist at the configured path
+
+### Recommendations
+1. Re-deploy the application with a valid source file path
+2. Or copy the application archive to the expected location
+```
 
 ---
 
